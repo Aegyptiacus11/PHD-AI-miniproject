@@ -1,0 +1,67 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+
+# uv
+.uv/
+
+# Packaging / build
+dist/
+build/
+*.egg-info/
+*.egg
+
+# Project README (local only; not versioned)
+README.md
+
+# Data & artifacts (training creates dirs as needed)
+data/
+
+models/*.pth
+
+results/*
+
+# Notebooks / Kaggle workflow (local only; not versioned)
+notebooks/
+*.ipynb
+
+# Jupyter
+.ipynb_checkpoints/
+**/jupyter_execute/**
+
+# ML / experiment tooling (if added later)
+wandb/
+mlruns/
+lightning_logs/
+
+# Env & secrets
+.env
+.env.*
+!.env.example
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Testing / coverage / typecheck / lint caches
+.coverage
+htmlcov/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+
+# Logs
+*.log
