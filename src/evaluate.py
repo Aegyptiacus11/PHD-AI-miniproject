@@ -301,74 +301,67 @@ def _compute_gradcam_map(
 
 
 # ---------------------------------------------------------------------------
-# ViT attention rollout
+# ViT token Grad-CAM
 # ---------------------------------------------------------------------------
 
-def _collect_vit_attentions(model: nn.Module, x: torch.Tensor) -> list[torch.Tensor]:
-    """Run a forward pass through a ViTB16Classifier and collect self-attention
-    weights from every encoder block."""
-    attn_maps: list[torch.Tensor] = []
-    hooks: list[torch.utils.hooks.RemovableHook] = []
+def _compute_vit_token_gradcam_map(model: nn.Module, x: torch.Tensor, *, class_idx: int) -> np.ndarray:
+    """Compute a Grad-CAM-style map from ViT patch tokens.
 
-    for block in model.net.encoder.layers:  # type: ignore[attr-defined]
-        def _hook(
-            _mod: nn.Module,
-            _inp: tuple[torch.Tensor, ...],
-            output: tuple[torch.Tensor, torch.Tensor],
-            _store: list[torch.Tensor] = attn_maps,
-        ) -> None:
-            if isinstance(output, tuple) and len(output) == 2:
-                _store.append(output[1].detach().cpu())  # attn weights
+    Hooks the final ViT encoder block output (B, N, C), where N=197 for ViT-B/16
+    (1 CLS token + 196 patch tokens). We drop CLS, weight channels by averaged
+    token gradients, then reshape patch scores to 14x14 and upsample.
+    """
+    activations: list[torch.Tensor] = []
+    gradients: list[torch.Tensor] = []
+    target_layer = model.net.encoder.layers[-1]  # type: ignore[attr-defined]
 
-        hooks.append(block.self_attention.register_forward_hook(_hook))
+    def _fwd_hook(_module: nn.Module, _inputs: tuple[torch.Tensor, ...], output: torch.Tensor) -> None:
+        activations.append(output.detach())
 
-    with torch.no_grad():
-        # torchvision ViT's MultiheadAttention needs need_weights=True
-        for block in model.net.encoder.layers:  # type: ignore[attr-defined]
-            block.self_attention.need_weights = True  # type: ignore[attr-defined]
-        model(x)
-    for h in hooks:
-        h.remove()
-    return attn_maps
+    def _bwd_hook(
+        _module: nn.Module, _grad_input: tuple[torch.Tensor, ...], grad_output: tuple[torch.Tensor, ...]
+    ) -> None:
+        gradients.append(grad_output[0].detach())
 
+    h1 = target_layer.register_forward_hook(_fwd_hook)
+    h2 = target_layer.register_full_backward_hook(_bwd_hook)
+    try:
+        model.zero_grad(set_to_none=True)
+        logits = model(x)
+        score = logits[:, class_idx].sum()
+        score.backward()
+    finally:
+        h1.remove()
+        h2.remove()
 
-def _attention_rollout(attn_maps: list[torch.Tensor], img_size: int = 224, patch_size: int = 16) -> np.ndarray:
-    """Aggregate multi-head attention across all layers via rollout (Abnar & Zuidema 2020)."""
-    n_patches_side = img_size // patch_size
-    n_tokens = n_patches_side * n_patches_side + 1  # +1 for CLS
+    if not activations or not gradients:
+        raise RuntimeError("ViT token Grad-CAM hooks did not capture activations/gradients.")
 
-    result = torch.eye(n_tokens)
-    for attn in attn_maps:
-        # attn shape: (batch, n_tokens, n_tokens) — already averaged over heads by PyTorch MHA
-        a = attn[0]
-        if a.dim() == 3:
-            a = a.mean(dim=0)
-        a = a[:n_tokens, :n_tokens]
-        a = 0.5 * a + 0.5 * torch.eye(n_tokens)
-        a = a / a.sum(dim=-1, keepdim=True)
-        result = a @ result
+    acts = activations[-1][0]  # (N, C)
+    grads = gradients[-1][0]  # (N, C)
+    if acts.ndim != 2 or grads.ndim != 2:
+        raise RuntimeError(f"Unexpected ViT tensor ranks: acts={acts.shape}, grads={grads.shape}")
 
-    # CLS token attention over spatial patches (skip CLS-to-CLS at index 0)
-    cls_attn = result[0, 1:].numpy()
-    cls_attn = cls_attn.reshape(n_patches_side, n_patches_side)
-    if cls_attn.max() > 0:
-        cls_attn = cls_attn / cls_attn.max()
+    # Drop CLS token (index 0), keep patch tokens only.
+    acts_p = acts[1:, :]
+    grads_p = grads[1:, :]
+    n_patches = acts_p.shape[0]
+    side = int(np.sqrt(n_patches))
+    if side * side != n_patches:
+        raise RuntimeError(f"Cannot reshape {n_patches} ViT patch tokens to square map.")
 
-    from PIL import Image as PILImage
-    cam = np.array(
-        PILImage.fromarray((cls_attn * 255).astype(np.uint8)).resize(
-            (img_size, img_size), PILImage.BILINEAR
-        )
-    ).astype(np.float32) / 255.0
-    return cam
-
-
-def _compute_attention_rollout_map(model: nn.Module, x: torch.Tensor) -> np.ndarray:
-    """Return a single-sample attention rollout heatmap for a ViT model."""
-    attn_maps = _collect_vit_attentions(model, x)
-    if not attn_maps:
-        raise RuntimeError("No attention maps captured — check ViT encoder hooks.")
-    return _attention_rollout(attn_maps, img_size=x.shape[-1])
+    weights = grads_p.mean(dim=0, keepdim=True)  # (1, C)
+    token_scores = torch.relu((acts_p * weights).sum(dim=1))  # (N_patches,)
+    cam = token_scores.reshape(side, side)
+    if float(cam.max()) > 0:
+        cam = cam / cam.max()
+    cam = F.interpolate(
+        cam.unsqueeze(0).unsqueeze(0),
+        size=(x.shape[-2], x.shape[-1]),
+        mode="bilinear",
+        align_corners=False,
+    ).squeeze()
+    return cam.detach().cpu().numpy()
 
 
 # ---------------------------------------------------------------------------
@@ -397,7 +390,7 @@ def _compute_saliency_map(
             model, x.to(device), class_idx=class_idx, target_layer=target, spatial_layout="hwc"
         )
     if model_type == "vit":
-        return _compute_attention_rollout_map(model, x.to(device))
+        return _compute_vit_token_gradcam_map(model, x.to(device), class_idx=class_idx)
     return None
 
 
@@ -413,7 +406,7 @@ def plot_gradcam_examples(
     """Save an interpretability overlay panel for all model types.
 
     Uses Grad-CAM for CNNs (ResNet18, MobileNetV2) and Swin-T,
-    and attention rollout for ViT-B/16.
+    and token Grad-CAM for ViT-B/16.
     """
     try:
         inputs, targets = next(iter(loader))
@@ -430,7 +423,7 @@ def plot_gradcam_examples(
         preds = model(inputs.to(device, non_blocking=True)).argmax(dim=1).cpu().numpy()
 
     rows, cols = 2, int(np.ceil(n_show / 2))
-    method_name = "Attention Rollout" if model_type == "vit" else "Grad-CAM"
+    method_name = "Token Grad-CAM" if model_type == "vit" else "Grad-CAM"
     out = Path(cfg.results_dir) / f"gradcam_{run_key}.png"
     out.parent.mkdir(parents=True, exist_ok=True)
     fig, axes = plt.subplots(rows, cols, figsize=(3.2 * cols, 6), dpi=150)
