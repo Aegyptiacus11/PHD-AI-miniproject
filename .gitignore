@@ -17,9 +17,6 @@ build/
 *.egg-info/
 *.egg
 
-# Project README (local only; not versioned)
-README.md
-
 # Data & artifacts (training creates dirs as needed)
 data/
 
