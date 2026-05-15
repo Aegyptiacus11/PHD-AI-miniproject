@@ -13,7 +13,6 @@ import numpy as np
 import seaborn as sns
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from sklearn.metrics import classification_report, confusion_matrix
 from torch.utils.data import DataLoader
 
@@ -389,159 +388,6 @@ def save_per_class_summary(
     print(f"Saved per-class summary to {json_out}, {csv_out}, {tex_out}")
 
 
-def _gradcam_target_layer(model: nn.Module, model_type: ModelName) -> nn.Module | None:
-    if model_type == "resnet18" and hasattr(model, "net"):
-        return model.net.layer4[-1]  # type: ignore[attr-defined]
-    if model_type == "mobilenet" and hasattr(model, "features"):
-        return model.features[-1]  # type: ignore[attr-defined]
-    if model_type == "swintiny" and hasattr(model, "net"):
-        return model.net.features[-1]  # type: ignore[attr-defined]
-    return None
-
-
-def _compute_gradcam_map(
-    model: nn.Module,
-    x: torch.Tensor,
-    *,
-    class_idx: int,
-    target_layer: nn.Module,
-    spatial_layout: str = "chw",
-) -> np.ndarray:
-    """Compute a Grad-CAM saliency map.
-
-    Args:
-        spatial_layout: ``"chw"`` for CNN layers (C,H,W) or ``"hwc"`` for
-            Swin-style layers (H,W,C).
-    """
-    activations: list[torch.Tensor] = []
-    gradients: list[torch.Tensor] = []
-
-    def _fwd_hook(_module: nn.Module, _inputs: tuple[torch.Tensor, ...], output: torch.Tensor) -> None:
-        activations.append(output.detach())
-
-    def _bwd_hook(
-        _module: nn.Module, _grad_input: tuple[torch.Tensor, ...], grad_output: tuple[torch.Tensor, ...]
-    ) -> None:
-        gradients.append(grad_output[0].detach())
-
-    h1 = target_layer.register_forward_hook(_fwd_hook)
-    h2 = target_layer.register_full_backward_hook(_bwd_hook)
-    try:
-        model.zero_grad(set_to_none=True)
-        logits = model(x)
-        score = logits[:, class_idx].sum()
-        score.backward()
-    finally:
-        h1.remove()
-        h2.remove()
-
-    if not activations or not gradients:
-        raise RuntimeError("Grad-CAM hooks did not capture activations/gradients.")
-
-    acts = activations[-1][0]
-    grads = gradients[-1][0]
-    if spatial_layout == "hwc":
-        acts = acts.permute(2, 0, 1)  # H,W,C -> C,H,W
-        grads = grads.permute(2, 0, 1)
-
-    weights = grads.mean(dim=(1, 2), keepdim=True)
-    cam = torch.relu((weights * acts).sum(dim=0))
-    if float(cam.max()) > 0:
-        cam = cam / cam.max()
-    cam = F.interpolate(
-        cam.unsqueeze(0).unsqueeze(0),
-        size=(x.shape[-2], x.shape[-1]),
-        mode="bilinear",
-        align_corners=False,
-    ).squeeze()
-    return cam.detach().cpu().numpy()
-
-
-# ---------------------------------------------------------------------------
-# Unified interpretability panel
-# ---------------------------------------------------------------------------
-
-def _compute_saliency_map(
-    model: nn.Module,
-    x: torch.Tensor,
-    *,
-    model_type: ModelName,
-    class_idx: int,
-    device: torch.device,
-) -> np.ndarray | None:
-    """Return a saliency heatmap for any supported model type."""
-    if model_type in ("resnet18", "mobilenet"):
-        target = _gradcam_target_layer(model, model_type)
-        if target is None:
-            return None
-        return _compute_gradcam_map(model, x.to(device), class_idx=class_idx, target_layer=target)
-    if model_type == "swintiny":
-        target = _gradcam_target_layer(model, model_type)
-        if target is None:
-            return None
-        return _compute_gradcam_map(
-            model, x.to(device), class_idx=class_idx, target_layer=target, spatial_layout="hwc"
-        )
-    return None
-
-
-def plot_gradcam_examples(
-    model: nn.Module,
-    loader: DataLoader[tuple[torch.Tensor, int]],
-    device: torch.device,
-    model_type: ModelName,
-    run_key: str,
-    *,
-    n_examples: int = 8,
-) -> None:
-    """Save a Grad-CAM interpretability overlay panel for supported models."""
-    try:
-        inputs, targets = next(iter(loader))
-    except StopIteration:
-        print(f"[{run_key}] Interpretability skipped (empty loader).")
-        return
-
-    model.eval()
-    n_show = min(n_examples, int(inputs.shape[0]))
-    if n_show == 0:
-        print(f"[{run_key}] Interpretability skipped (no samples in first batch).")
-        return
-    with torch.no_grad():
-        preds = model(inputs.to(device, non_blocking=True)).argmax(dim=1).cpu().numpy()
-
-    rows, cols = 2, int(np.ceil(n_show / 2))
-    method_name = "Grad-CAM"
-    out = Path(cfg.results_dir) / f"gradcam_{run_key}.png"
-    out.parent.mkdir(parents=True, exist_ok=True)
-    fig, axes = plt.subplots(rows, cols, figsize=(3.2 * cols, 6), dpi=150)
-    axes_flat = np.atleast_1d(axes).ravel()
-    for ax in axes_flat:
-        ax.axis("off")
-
-    for i in range(n_show):
-        x_cpu = inputs[i : i + 1].cpu()
-        class_idx = int(preds[i])
-        cam = _compute_saliency_map(
-            model, x_cpu, model_type=model_type, class_idx=class_idx, device=device
-        )
-        if cam is None:
-            continue
-        base = _to_display_gray(x_cpu, model_type)[0]
-        heat = plt.get_cmap("jet")(cam)[..., :3]
-        overlay = np.clip(0.55 * np.stack([base, base, base], axis=-1) + 0.45 * heat, 0.0, 1.0)
-        ax = axes_flat[i]
-        ax.imshow(overlay)
-        t = cfg.class_names[int(targets[i].item())]
-        p = cfg.class_names[class_idx]
-        ax.set_title(f"T:{t} P:{p}", fontsize=9)
-
-    fig.suptitle(f"{method_name} ({run_key} / {model_type})")
-    fig.tight_layout()
-    fig.savefig(out)
-    plt.show()
-    print(f"Saved {method_name} panel to {out}")
-
-
 def copy_results_to_report_figures() -> None:
     """Copy report-relevant result artifacts to ``report/figures``."""
     src = Path(cfg.results_dir)
@@ -721,7 +567,6 @@ def run_evaluation(
                     float(cls_metrics.get("support", 0.0)),
                 )
             )
-        plot_gradcam_examples(model, test_loader, device, model_type, run_key)
 
     selected_histories = {rk: histories.get(rk, {}) for rk, _, _ in eval_plan}
     plot_curves(selected_histories)
