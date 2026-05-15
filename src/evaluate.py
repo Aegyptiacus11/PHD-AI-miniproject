@@ -217,8 +217,10 @@ def plot_wrong_predictions(
     plt.show()
 
 
-def save_classification_report(preds: np.ndarray, labels: np.ndarray, model_type: ModelName, run_key: str) -> None:
-    """Write sklearn classification report to ``results/classification_report_{model_type}.txt``."""
+def save_classification_report(
+    preds: np.ndarray, labels: np.ndarray, model_type: ModelName, run_key: str
+) -> tuple[dict[str, dict[str, float]], dict[str, float]]:
+    """Write sklearn classification report and return per-class + overall metrics."""
     out = Path(cfg.results_dir) / f"classification_report_{run_key}.txt"
     out.parent.mkdir(parents=True, exist_ok=True)
     report = classification_report(
@@ -227,9 +229,164 @@ def save_classification_report(preds: np.ndarray, labels: np.ndarray, model_type
         labels=np.arange(cfg.num_classes),
         target_names=cfg.class_names,
         digits=4,
+        zero_division=0,
+    )
+    report_dict: dict[str, Any] = classification_report(
+        labels,
+        preds,
+        labels=np.arange(cfg.num_classes),
+        target_names=cfg.class_names,
+        output_dict=True,
+        zero_division=0,
     )
     out.write_text(report + "\n", encoding="utf-8")
     print(f"Saved classification report to {out}")
+    per_class: dict[str, dict[str, float]] = {}
+    for cls_name in cfg.class_names:
+        cls_row = report_dict.get(cls_name, {})
+        per_class[cls_name] = {
+            "precision": float(cls_row.get("precision", 0.0)),
+            "recall": float(cls_row.get("recall", 0.0)),
+            "f1": float(cls_row.get("f1-score", 0.0)),
+            "support": float(cls_row.get("support", 0.0)),
+        }
+    macro = report_dict.get("macro avg", {})
+    weighted = report_dict.get("weighted avg", {})
+    overall = {
+        "accuracy": float(report_dict.get("accuracy", 0.0)),
+        "macro_precision": float(macro.get("precision", 0.0)),
+        "macro_recall": float(macro.get("recall", 0.0)),
+        "macro_f1": float(macro.get("f1-score", 0.0)),
+        "weighted_precision": float(weighted.get("precision", 0.0)),
+        "weighted_recall": float(weighted.get("recall", 0.0)),
+        "weighted_f1": float(weighted.get("f1-score", 0.0)),
+    }
+    return per_class, overall
+
+
+def save_model_comparison_summary(rows: list[tuple[str, float, int, float]]) -> None:
+    """Save model/test summary (acc + params + train_time) to JSON/CSV/LaTeX."""
+    out_dir = Path(cfg.results_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    json_out = out_dir / "model_comparison_summary.json"
+    csv_out = out_dir / "model_comparison_summary.csv"
+    tex_out = out_dir / "model_comparison_summary.tex"
+
+    payload = [
+        {"model": m, "test_acc": acc, "params": params, "train_time_s": t}
+        for m, acc, params, t in rows
+    ]
+    json_out.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+    csv_lines = ["model,test_acc,params,train_time_s"]
+    for m, acc, params, t in rows:
+        csv_lines.append(f"{m},{acc:.4f},{params},{t:.1f}")
+    csv_out.write_text("\n".join(csv_lines) + "\n", encoding="utf-8")
+
+    tex_lines = [
+        r"\begin{tabular}{lrrr}",
+        r"\toprule",
+        r"Model & Test Acc & Params & Train Time (s) \\",
+        r"\midrule",
+    ]
+    for m, acc, params, t in rows:
+        tex_lines.append(f"{m} & {acc:.4f} & {params:,} & {t:.1f} " + r"\\")
+    tex_lines.extend([r"\bottomrule", r"\end{tabular}"])
+    tex_out.write_text("\n".join(tex_lines) + "\n", encoding="utf-8")
+    print(f"Saved model comparison summary to {json_out}, {csv_out}, {tex_out}")
+
+
+def save_overall_metrics_summary(
+    rows: list[tuple[str, float, float, float, float, float, float, float]],
+) -> None:
+    """Save overall test metrics (accuracy + macro/weighted P/R/F1) to JSON/CSV/LaTeX."""
+    out_dir = Path(cfg.results_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    json_out = out_dir / "overall_metrics_summary.json"
+    csv_out = out_dir / "overall_metrics_summary.csv"
+    tex_out = out_dir / "overall_metrics_summary.tex"
+
+    payload = [
+        {
+            "model": m,
+            "accuracy": acc,
+            "macro_precision": mp,
+            "macro_recall": mr,
+            "macro_f1": mf1,
+            "weighted_precision": wp,
+            "weighted_recall": wr,
+            "weighted_f1": wf1,
+        }
+        for m, acc, mp, mr, mf1, wp, wr, wf1 in rows
+    ]
+    json_out.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+    csv_lines = [
+        "model,accuracy,macro_precision,macro_recall,macro_f1,weighted_precision,weighted_recall,weighted_f1"
+    ]
+    for m, acc, mp, mr, mf1, wp, wr, wf1 in rows:
+        csv_lines.append(f"{m},{acc:.4f},{mp:.4f},{mr:.4f},{mf1:.4f},{wp:.4f},{wr:.4f},{wf1:.4f}")
+    csv_out.write_text("\n".join(csv_lines) + "\n", encoding="utf-8")
+
+    tex_lines = [
+        r"\begin{tabular}{lrrrrrrr}",
+        r"\toprule",
+        r"Model & Acc & Macro P & Macro R & Macro F1 & Weighted P & Weighted R & Weighted F1 \\",
+        r"\midrule",
+    ]
+    for m, acc, mp, mr, mf1, wp, wr, wf1 in rows:
+        tex_lines.append(
+            f"{m} & {acc:.4f} & {mp:.4f} & {mr:.4f} & {mf1:.4f} & {wp:.4f} & {wr:.4f} & {wf1:.4f} " + r"\\"
+        )
+    tex_lines.extend([r"\bottomrule", r"\end{tabular}"])
+    tex_out.write_text("\n".join(tex_lines) + "\n", encoding="utf-8")
+    print(f"Saved overall metrics summary to {json_out}, {csv_out}, {tex_out}")
+
+
+def save_per_class_summary(
+    rows: list[tuple[str, str, float, float, float, float]],
+) -> None:
+    """Persist per-class precision/recall/F1/support as JSON, CSV, and LaTeX tabular."""
+    out_dir = Path(cfg.results_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    json_out = out_dir / "per_class_metrics_summary.json"
+    csv_out = out_dir / "per_class_metrics_summary.csv"
+    tex_out = out_dir / "per_class_metrics_summary.tex"
+
+    payload = [
+        {
+            "model": m,
+            "class": c,
+            "precision": p,
+            "recall": r,
+            "f1": f1,
+            "support": s,
+        }
+        for m, c, p, r, f1, s in rows
+    ]
+    json_out.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+    csv_lines = ["model,class,precision,recall,f1,support"]
+    for m, c, p, r, f1, s in rows:
+        csv_lines.append(f"{m},{c},{p:.4f},{r:.4f},{f1:.4f},{int(s)}")
+    csv_out.write_text("\n".join(csv_lines) + "\n", encoding="utf-8")
+
+    tex_lines = [
+        r"\begin{tabular}{llrrrr}",
+        r"\toprule",
+        r"Model & Class & Precision & Recall & F1 & Support \\",
+        r"\midrule",
+    ]
+    prev_model: str | None = None
+    for m, c, p, r, f1, s in rows:
+        if prev_model is not None and m != prev_model:
+            tex_lines.append(r"\midrule")
+        tex_lines.append(f"{m} & {c} & {p:.4f} & {r:.4f} & {f1:.4f} & {int(s)} " + r"\\")
+        prev_model = m
+    tex_lines.extend([r"\bottomrule", r"\end{tabular}"])
+    tex_out.write_text("\n".join(tex_lines) + "\n", encoding="utf-8")
+    print(f"Saved per-class summary to {json_out}, {csv_out}, {tex_out}")
 
 
 def _gradcam_target_layer(model: nn.Module, model_type: ModelName) -> nn.Module | None:
@@ -556,6 +713,8 @@ def run_evaluation(
     histories: dict[str, dict[str, Any]] = json.loads(hp.read_text(encoding="utf-8"))
 
     summary_rows: list[tuple[str, float, int, float]] = []
+    overall_rows: list[tuple[str, float, float, float, float, float, float, float]] = []
+    per_class_rows: list[tuple[str, str, float, float, float, float]] = []
     if runs is not None and models is not None:
         raise ValueError("Use either `runs` or `models`, not both.")
 
@@ -607,7 +766,31 @@ def run_evaluation(
 
         plot_confusion_matrix(preds, labels, model_type, run_key)
         plot_wrong_predictions(preds, labels, images, model_type, run_key)
-        save_classification_report(preds, labels, model_type, run_key)
+        per_class, overall = save_classification_report(preds, labels, model_type, run_key)
+        overall_rows.append(
+            (
+                f"{run_key}({model_type})",
+                float(overall.get("accuracy", acc)),
+                float(overall.get("macro_precision", 0.0)),
+                float(overall.get("macro_recall", 0.0)),
+                float(overall.get("macro_f1", 0.0)),
+                float(overall.get("weighted_precision", 0.0)),
+                float(overall.get("weighted_recall", 0.0)),
+                float(overall.get("weighted_f1", 0.0)),
+            )
+        )
+        for cls_name in cfg.class_names:
+            cls_metrics = per_class.get(cls_name, {})
+            per_class_rows.append(
+                (
+                    f"{run_key}({model_type})",
+                    cls_name,
+                    float(cls_metrics.get("precision", 0.0)),
+                    float(cls_metrics.get("recall", 0.0)),
+                    float(cls_metrics.get("f1", 0.0)),
+                    float(cls_metrics.get("support", 0.0)),
+                )
+            )
         plot_gradcam_examples(model, test_loader, device, model_type, run_key)
 
     selected_histories = {rk: histories.get(rk, {}) for rk, _, _ in eval_plan}
@@ -618,6 +801,12 @@ def run_evaluation(
     print(f"{'model':<12}{'test_acc':>12}{'params':>14}{'train_time_s':>14}")
     for name, acc, n_params, ttime in summary_rows:
         print(f"{name:<12}{acc:12.4f}{n_params:14d}{ttime:14.1f}")
+    if summary_rows:
+        save_model_comparison_summary(summary_rows)
+    if overall_rows:
+        save_overall_metrics_summary(overall_rows)
+    if per_class_rows:
+        save_per_class_summary(per_class_rows)
     copy_results_to_report_figures()
 
 
