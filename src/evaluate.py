@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 from pathlib import Path
 from typing import Any, Literal
 
@@ -12,6 +13,7 @@ import numpy as np
 import seaborn as sns
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from sklearn.metrics import classification_report, confusion_matrix
 from torch.utils.data import DataLoader
 
@@ -59,7 +61,7 @@ def _strip_history(entry: dict[str, Any]) -> dict[str, list[float]]:
 
 def plot_curves(histories: dict[str, dict[str, Any]]) -> None:
     """
-    Plot side-by-side accuracy and loss curves for available models.
+    Plot side-by-side accuracy and loss curves for all models on one figure.
 
     Saves ``results/training_curves.png`` with ``dpi=150``.
     """
@@ -91,6 +93,50 @@ def plot_curves(histories: dict[str, dict[str, Any]]) -> None:
     fig.tight_layout()
     fig.savefig(out)
     plt.show()
+
+
+def plot_curves_per_model(histories: dict[str, dict[str, Any]]) -> None:
+    """Plot individual train/val curves for each model as separate figures.
+
+    A vertical dashed line marks the freeze-to-unfreeze boundary for transfer models.
+    """
+    out_dir = Path(cfg.results_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    freeze_epoch = cfg.freeze_backbone_epochs
+    for name, data in histories.items():
+        h = _strip_history(data)
+        if not h.get("train_acc"):
+            continue
+        n = min(len(h["train_acc"]), len(h["val_acc"]), len(h["train_loss"]), len(h["val_loss"]))
+        if n == 0:
+            continue
+        model_type = data.get("model_type", "")
+        is_transfer = model_type in cfg.transfer_model_types
+        epochs = np.arange(1, n + 1)
+        fig, axes = plt.subplots(1, 2, figsize=(10, 4), dpi=150)
+        axes[0].plot(epochs, h["train_acc"][:n], label="Train")
+        axes[0].plot(epochs, h["val_acc"][:n], linestyle="--", label="Val")
+        if is_transfer and freeze_epoch < n:
+            axes[0].axvline(x=freeze_epoch + 0.5, color="gray", linestyle=":", alpha=0.7, label="Unfreeze")
+        axes[0].set_title(f"{name} — Accuracy")
+        axes[0].set_xlabel("Epoch")
+        axes[0].set_ylabel("Accuracy")
+        axes[0].legend()
+        axes[0].grid(True, alpha=0.3)
+        axes[1].plot(epochs, h["train_loss"][:n], label="Train")
+        axes[1].plot(epochs, h["val_loss"][:n], linestyle="--", label="Val")
+        if is_transfer and freeze_epoch < n:
+            axes[1].axvline(x=freeze_epoch + 0.5, color="gray", linestyle=":", alpha=0.7, label="Unfreeze")
+        axes[1].set_title(f"{name} — Loss")
+        axes[1].set_xlabel("Epoch")
+        axes[1].set_ylabel("Loss")
+        axes[1].legend()
+        axes[1].grid(True, alpha=0.3)
+        fig.tight_layout()
+        out = out_dir / f"training_curves_{name}.png"
+        fig.savefig(out)
+        plt.show()
+        print(f"Saved per-model curves to {out}")
 
 
 def plot_confusion_matrix(preds: np.ndarray, labels: np.ndarray, model_type: ModelName, run_key: str) -> None:
@@ -184,6 +230,250 @@ def save_classification_report(preds: np.ndarray, labels: np.ndarray, model_type
     )
     out.write_text(report + "\n", encoding="utf-8")
     print(f"Saved classification report to {out}")
+
+
+def _gradcam_target_layer(model: nn.Module, model_type: ModelName) -> nn.Module | None:
+    if model_type == "resnet18" and hasattr(model, "net"):
+        return model.net.layer4[-1]  # type: ignore[attr-defined]
+    if model_type == "mobilenet" and hasattr(model, "features"):
+        return model.features[-1]  # type: ignore[attr-defined]
+    if model_type == "swintiny" and hasattr(model, "net"):
+        return model.net.features[-1]  # type: ignore[attr-defined]
+    return None
+
+
+def _compute_gradcam_map(
+    model: nn.Module,
+    x: torch.Tensor,
+    *,
+    class_idx: int,
+    target_layer: nn.Module,
+    spatial_layout: str = "chw",
+) -> np.ndarray:
+    """Compute a Grad-CAM saliency map.
+
+    Args:
+        spatial_layout: ``"chw"`` for CNN layers (C,H,W) or ``"hwc"`` for
+            Swin-style layers (H,W,C).
+    """
+    activations: list[torch.Tensor] = []
+    gradients: list[torch.Tensor] = []
+
+    def _fwd_hook(_module: nn.Module, _inputs: tuple[torch.Tensor, ...], output: torch.Tensor) -> None:
+        activations.append(output.detach())
+
+    def _bwd_hook(
+        _module: nn.Module, _grad_input: tuple[torch.Tensor, ...], grad_output: tuple[torch.Tensor, ...]
+    ) -> None:
+        gradients.append(grad_output[0].detach())
+
+    h1 = target_layer.register_forward_hook(_fwd_hook)
+    h2 = target_layer.register_full_backward_hook(_bwd_hook)
+    try:
+        model.zero_grad(set_to_none=True)
+        logits = model(x)
+        score = logits[:, class_idx].sum()
+        score.backward()
+    finally:
+        h1.remove()
+        h2.remove()
+
+    if not activations or not gradients:
+        raise RuntimeError("Grad-CAM hooks did not capture activations/gradients.")
+
+    acts = activations[-1][0]
+    grads = gradients[-1][0]
+    if spatial_layout == "hwc":
+        acts = acts.permute(2, 0, 1)  # H,W,C -> C,H,W
+        grads = grads.permute(2, 0, 1)
+
+    weights = grads.mean(dim=(1, 2), keepdim=True)
+    cam = torch.relu((weights * acts).sum(dim=0))
+    if float(cam.max()) > 0:
+        cam = cam / cam.max()
+    cam = F.interpolate(
+        cam.unsqueeze(0).unsqueeze(0),
+        size=(x.shape[-2], x.shape[-1]),
+        mode="bilinear",
+        align_corners=False,
+    ).squeeze()
+    return cam.detach().cpu().numpy()
+
+
+# ---------------------------------------------------------------------------
+# ViT attention rollout
+# ---------------------------------------------------------------------------
+
+def _collect_vit_attentions(model: nn.Module, x: torch.Tensor) -> list[torch.Tensor]:
+    """Run a forward pass through a ViTB16Classifier and collect self-attention
+    weights from every encoder block."""
+    attn_maps: list[torch.Tensor] = []
+    hooks: list[torch.utils.hooks.RemovableHook] = []
+
+    for block in model.net.encoder.layers:  # type: ignore[attr-defined]
+        def _hook(
+            _mod: nn.Module,
+            _inp: tuple[torch.Tensor, ...],
+            output: tuple[torch.Tensor, torch.Tensor],
+            _store: list[torch.Tensor] = attn_maps,
+        ) -> None:
+            if isinstance(output, tuple) and len(output) == 2:
+                _store.append(output[1].detach().cpu())  # attn weights
+
+        hooks.append(block.self_attention.register_forward_hook(_hook))
+
+    with torch.no_grad():
+        # torchvision ViT's MultiheadAttention needs need_weights=True
+        for block in model.net.encoder.layers:  # type: ignore[attr-defined]
+            block.self_attention.need_weights = True  # type: ignore[attr-defined]
+        model(x)
+    for h in hooks:
+        h.remove()
+    return attn_maps
+
+
+def _attention_rollout(attn_maps: list[torch.Tensor], img_size: int = 224, patch_size: int = 16) -> np.ndarray:
+    """Aggregate multi-head attention across all layers via rollout (Abnar & Zuidema 2020)."""
+    n_patches_side = img_size // patch_size
+    n_tokens = n_patches_side * n_patches_side + 1  # +1 for CLS
+
+    result = torch.eye(n_tokens)
+    for attn in attn_maps:
+        # attn shape: (batch, n_tokens, n_tokens) — already averaged over heads by PyTorch MHA
+        a = attn[0]
+        if a.dim() == 3:
+            a = a.mean(dim=0)
+        a = a[:n_tokens, :n_tokens]
+        a = 0.5 * a + 0.5 * torch.eye(n_tokens)
+        a = a / a.sum(dim=-1, keepdim=True)
+        result = a @ result
+
+    # CLS token attention over spatial patches (skip CLS-to-CLS at index 0)
+    cls_attn = result[0, 1:].numpy()
+    cls_attn = cls_attn.reshape(n_patches_side, n_patches_side)
+    if cls_attn.max() > 0:
+        cls_attn = cls_attn / cls_attn.max()
+
+    from PIL import Image as PILImage
+    cam = np.array(
+        PILImage.fromarray((cls_attn * 255).astype(np.uint8)).resize(
+            (img_size, img_size), PILImage.BILINEAR
+        )
+    ).astype(np.float32) / 255.0
+    return cam
+
+
+def _compute_attention_rollout_map(model: nn.Module, x: torch.Tensor) -> np.ndarray:
+    """Return a single-sample attention rollout heatmap for a ViT model."""
+    attn_maps = _collect_vit_attentions(model, x)
+    if not attn_maps:
+        raise RuntimeError("No attention maps captured — check ViT encoder hooks.")
+    return _attention_rollout(attn_maps, img_size=x.shape[-1])
+
+
+# ---------------------------------------------------------------------------
+# Unified interpretability panel
+# ---------------------------------------------------------------------------
+
+def _compute_saliency_map(
+    model: nn.Module,
+    x: torch.Tensor,
+    *,
+    model_type: ModelName,
+    class_idx: int,
+    device: torch.device,
+) -> np.ndarray | None:
+    """Return a saliency heatmap for any supported model type."""
+    if model_type in ("resnet18", "mobilenet"):
+        target = _gradcam_target_layer(model, model_type)
+        if target is None:
+            return None
+        return _compute_gradcam_map(model, x.to(device), class_idx=class_idx, target_layer=target)
+    if model_type == "swintiny":
+        target = _gradcam_target_layer(model, model_type)
+        if target is None:
+            return None
+        return _compute_gradcam_map(
+            model, x.to(device), class_idx=class_idx, target_layer=target, spatial_layout="hwc"
+        )
+    if model_type == "vit":
+        return _compute_attention_rollout_map(model, x.to(device))
+    return None
+
+
+def plot_gradcam_examples(
+    model: nn.Module,
+    loader: DataLoader[tuple[torch.Tensor, int]],
+    device: torch.device,
+    model_type: ModelName,
+    run_key: str,
+    *,
+    n_examples: int = 8,
+) -> None:
+    """Save an interpretability overlay panel for all model types.
+
+    Uses Grad-CAM for CNNs (ResNet18, MobileNetV2) and Swin-T,
+    and attention rollout for ViT-B/16.
+    """
+    try:
+        inputs, targets = next(iter(loader))
+    except StopIteration:
+        print(f"[{run_key}] Interpretability skipped (empty loader).")
+        return
+
+    model.eval()
+    n_show = min(n_examples, int(inputs.shape[0]))
+    if n_show == 0:
+        print(f"[{run_key}] Interpretability skipped (no samples in first batch).")
+        return
+    with torch.no_grad():
+        preds = model(inputs.to(device, non_blocking=True)).argmax(dim=1).cpu().numpy()
+
+    rows, cols = 2, int(np.ceil(n_show / 2))
+    method_name = "Attention Rollout" if model_type == "vit" else "Grad-CAM"
+    out = Path(cfg.results_dir) / f"gradcam_{run_key}.png"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    fig, axes = plt.subplots(rows, cols, figsize=(3.2 * cols, 6), dpi=150)
+    axes_flat = np.atleast_1d(axes).ravel()
+    for ax in axes_flat:
+        ax.axis("off")
+
+    for i in range(n_show):
+        x_cpu = inputs[i : i + 1].cpu()
+        class_idx = int(preds[i])
+        cam = _compute_saliency_map(
+            model, x_cpu, model_type=model_type, class_idx=class_idx, device=device
+        )
+        if cam is None:
+            continue
+        base = _to_display_gray(x_cpu, model_type)[0]
+        heat = plt.get_cmap("jet")(cam)[..., :3]
+        overlay = np.clip(0.55 * np.stack([base, base, base], axis=-1) + 0.45 * heat, 0.0, 1.0)
+        ax = axes_flat[i]
+        ax.imshow(overlay)
+        t = cfg.class_names[int(targets[i].item())]
+        p = cfg.class_names[class_idx]
+        ax.set_title(f"T:{t} P:{p}", fontsize=9)
+
+    fig.suptitle(f"{method_name} ({run_key} / {model_type})")
+    fig.tight_layout()
+    fig.savefig(out)
+    plt.show()
+    print(f"Saved {method_name} panel to {out}")
+
+
+def copy_results_to_report_figures() -> None:
+    """Copy report-relevant result artifacts to ``report/figures``."""
+    src = Path(cfg.results_dir)
+    dst = Path("report/figures")
+    dst.mkdir(parents=True, exist_ok=True)
+    copied = 0
+    for pattern in ("*.png", "*.txt", "*.csv", "*.json", "*.tex"):
+        for p in src.glob(pattern):
+            if p.is_file():
+                shutil.copy2(p, dst / p.name)
+                copied += 1
+    print(f"Copied {copied} result files to {dst}")
 
 
 def _load_weights(model: nn.Module, path: Path, model_type: ModelName) -> None:
@@ -307,7 +597,7 @@ def run_evaluation(
             cfg.train_dir,
             cfg.test_dir,
             model_type=model_type,  # type: ignore[arg-type]
-            val_dir=cfg.val_dir if Path(cfg.val_dir).is_dir() else None,
+            val_dir=None,
             use_cache=use_cache,
             cache_train_pt=cfg.cache_train_pt,
             cache_val_pt=cfg.cache_val_pt,
@@ -325,14 +615,17 @@ def run_evaluation(
         plot_confusion_matrix(preds, labels, model_type, run_key)
         plot_wrong_predictions(preds, labels, images, model_type, run_key)
         save_classification_report(preds, labels, model_type, run_key)
+        plot_gradcam_examples(model, test_loader, device, model_type, run_key)
 
     selected_histories = {rk: histories.get(rk, {}) for rk, _, _ in eval_plan}
     plot_curves(selected_histories)
+    plot_curves_per_model(selected_histories)
 
     print("\nModel comparison (test set):")
     print(f"{'model':<12}{'test_acc':>12}{'params':>14}{'train_time_s':>14}")
     for name, acc, n_params, ttime in summary_rows:
         print(f"{name:<12}{acc:12.4f}{n_params:14d}{ttime:14.1f}")
+    copy_results_to_report_figures()
 
 
 def main() -> None:

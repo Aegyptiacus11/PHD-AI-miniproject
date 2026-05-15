@@ -69,7 +69,8 @@ if USE_TENSOR_CACHE:
 # %%
 os.system(
     f'uv run python -m src.preview --train_dir "{TRAIN_DIR}" --test_dir "{TEST_DIR}" '
-    f'{VAL_ARG} --out results/notebook_sample_grid.png --n 16 --dpi 150'
+    f'{VAL_ARG} --out results/notebook_sample_grid.png --n 16 --dpi 150 '
+    f'--problem_statement_dir report/figures'
 )
 
 # %%
@@ -111,5 +112,5 @@ os.system(
 # %%
 os.system(
     f'uv run python -m src.evaluate --train_dir "{TRAIN_DIR}" --test_dir "{TEST_DIR}" '
-    f'{VAL_ARG}{CACHE_ARGS} --runs "{RUN_RESNET18}" "{RUN_MOBILENET}" "{RUN_VIT}" "{RUN_SWINTINY}"'
+    f'{CACHE_ARGS} --runs "{RUN_RESNET18}" "{RUN_MOBILENET}" "{RUN_VIT}" "{RUN_SWINTINY}"'
 )

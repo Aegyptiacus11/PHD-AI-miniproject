@@ -64,6 +64,41 @@ def _save_sample_grid(
     print(f"Saved preview grid to {out_path}", flush=True)
 
 
+def _save_problem_statement_figures(train_dir: str | Path, out_dir: str | Path, *, dpi: int) -> None:
+    """Export one NORMAL and one PNEUMONIA training example for report introductions."""
+    ds = _imagefolder(train_dir)
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    targets = {"NORMAL": None, "PNEUMONIA": None}
+    for name in targets:
+        if name not in ds.class_to_idx:
+            raise ValueError(f"Expected class folder {name!r} under {train_dir}, got {list(ds.class_to_idx)}")
+    want = {ds.class_to_idx["NORMAL"]: "NORMAL", ds.class_to_idx["PNEUMONIA"]: "PNEUMONIA"}
+    for i in range(len(ds)):
+        _, lab = ds[i]
+        key = want.get(int(lab))
+        if key is not None and targets[key] is None:
+            targets[key] = i
+        if all(v is not None for v in targets.values()):
+            break
+    missing = [k for k, v in targets.items() if v is None]
+    if missing:
+        raise RuntimeError(f"Could not find training samples for classes: {missing}")
+
+    for label, idx in targets.items():
+        assert idx is not None
+        img, _ = ds[idx]
+        arr = np.asarray(img).squeeze()
+        fig, ax = plt.subplots(1, 1, figsize=(4.5, 4.5), dpi=dpi)
+        ax.imshow(arr, cmap="gray")
+        ax.axis("off")
+        fig.tight_layout(pad=0.1)
+        path = out / f"problem_statement_{label.lower()}.png"
+        fig.savefig(path, bbox_inches="tight", pad_inches=0.05)
+        plt.close(fig)
+        print(f"Saved {path}", flush=True)
+
+
 def run_preview(
     train_dir: str | Path,
     *,
@@ -81,6 +116,11 @@ def run_preview(
     _print_stats(train_dir, test_dir, val_dir)
     out_path = Path(out or Path(cfg.results_dir) / "dataset_preview.png")
     _save_sample_grid(train_dir, out_path, n=n, dpi=dpi)
+
+
+def run_problem_statement_export(train_dir: str | Path, problem_statement_dir: str | Path, *, dpi: int) -> None:
+    """Export introductory CXR figures (one per class) for the LaTeX problem statement."""
+    _save_problem_statement_figures(train_dir, problem_statement_dir, dpi=dpi)
 
 
 def main() -> None:
@@ -102,8 +142,16 @@ def main() -> None:
         action="store_true",
         help="Only print train/test row counts; do not write an image.",
     )
+    parser.add_argument(
+        "--problem_statement_dir",
+        type=str,
+        default=None,
+        help="If set, also write problem_statement_normal.png and problem_statement_pneumonia.png there.",
+    )
     args = parser.parse_args()
 
+    if args.problem_statement_dir:
+        _save_problem_statement_figures(args.train_dir, args.problem_statement_dir, dpi=args.dpi)
     run_preview(
         args.train_dir,
         test_dir=args.test_dir,

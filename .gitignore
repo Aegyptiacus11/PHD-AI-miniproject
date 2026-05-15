@@ -31,6 +31,9 @@ results/*
 notebooks/
 *.ipynb
 
+# LaTeX report (local only; not versioned)
+report/
+
 # Jupyter
 .ipynb_checkpoints/
 **/jupyter_execute/**
