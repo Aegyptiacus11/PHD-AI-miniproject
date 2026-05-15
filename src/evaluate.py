@@ -95,7 +95,7 @@ def plot_curves(histories: dict[str, dict[str, Any]]) -> None:
 
 def plot_confusion_matrix(preds: np.ndarray, labels: np.ndarray, model_type: ModelName, run_key: str) -> None:
     """
-    Plot a row-normalized confusion matrix as percentages.
+    Plot a row-normalized confusion matrix (color by % of true class) with raw counts annotated.
 
     Saves ``results/confusion_matrix_{model_type}.png``.
     """
@@ -107,15 +107,19 @@ def plot_confusion_matrix(preds: np.ndarray, labels: np.ndarray, model_type: Mod
     fig, ax = plt.subplots(figsize=(10, 8), dpi=150)
     sns.heatmap(
         pct,
-        annot=False,
+        annot=cm,
+        fmt="d",
         cmap="Blues",
         xticklabels=cfg.class_names,
         yticklabels=cfg.class_names,
         ax=ax,
+        annot_kws={"size": 14},
     )
     ax.set_xlabel("Predicted")
     ax.set_ylabel("True")
-    ax.set_title(f"Confusion matrix ({run_key} / {model_type}) — % of true class")
+    ax.set_title(
+        f"Confusion matrix ({run_key} / {model_type}) — color: % of true row; cells: raw counts"
+    )
     fig.tight_layout()
     fig.savefig(out)
     plt.show()
