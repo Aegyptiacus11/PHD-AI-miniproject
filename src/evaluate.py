@@ -458,70 +458,6 @@ def _compute_gradcam_map(
 
 
 # ---------------------------------------------------------------------------
-# ViT token Grad-CAM
-# ---------------------------------------------------------------------------
-
-def _compute_vit_token_gradcam_map(model: nn.Module, x: torch.Tensor, *, class_idx: int) -> np.ndarray:
-    """Compute a Grad-CAM-style map from ViT patch tokens.
-
-    Hooks the final ViT encoder block output (B, N, C), where N=197 for ViT-B/16
-    (1 CLS token + 196 patch tokens). We drop CLS, weight channels by averaged
-    token gradients, then reshape patch scores to 14x14 and upsample.
-    """
-    activations: list[torch.Tensor] = []
-    gradients: list[torch.Tensor] = []
-    target_layer = model.net.encoder.layers[-1]  # type: ignore[attr-defined]
-
-    def _fwd_hook(_module: nn.Module, _inputs: tuple[torch.Tensor, ...], output: torch.Tensor) -> None:
-        activations.append(output.detach())
-
-    def _bwd_hook(
-        _module: nn.Module, _grad_input: tuple[torch.Tensor, ...], grad_output: tuple[torch.Tensor, ...]
-    ) -> None:
-        gradients.append(grad_output[0].detach())
-
-    h1 = target_layer.register_forward_hook(_fwd_hook)
-    h2 = target_layer.register_full_backward_hook(_bwd_hook)
-    try:
-        model.zero_grad(set_to_none=True)
-        logits = model(x)
-        score = logits[:, class_idx].sum()
-        score.backward()
-    finally:
-        h1.remove()
-        h2.remove()
-
-    if not activations or not gradients:
-        raise RuntimeError("ViT token Grad-CAM hooks did not capture activations/gradients.")
-
-    acts = activations[-1][0]  # (N, C)
-    grads = gradients[-1][0]  # (N, C)
-    if acts.ndim != 2 or grads.ndim != 2:
-        raise RuntimeError(f"Unexpected ViT tensor ranks: acts={acts.shape}, grads={grads.shape}")
-
-    # Drop CLS token (index 0), keep patch tokens only.
-    acts_p = acts[1:, :]
-    grads_p = grads[1:, :]
-    n_patches = acts_p.shape[0]
-    side = int(np.sqrt(n_patches))
-    if side * side != n_patches:
-        raise RuntimeError(f"Cannot reshape {n_patches} ViT patch tokens to square map.")
-
-    weights = grads_p.mean(dim=0, keepdim=True)  # (1, C)
-    token_scores = torch.relu((acts_p * weights).sum(dim=1))  # (N_patches,)
-    cam = token_scores.reshape(side, side)
-    if float(cam.max()) > 0:
-        cam = cam / cam.max()
-    cam = F.interpolate(
-        cam.unsqueeze(0).unsqueeze(0),
-        size=(x.shape[-2], x.shape[-1]),
-        mode="bilinear",
-        align_corners=False,
-    ).squeeze()
-    return cam.detach().cpu().numpy()
-
-
-# ---------------------------------------------------------------------------
 # Unified interpretability panel
 # ---------------------------------------------------------------------------
 
@@ -546,8 +482,6 @@ def _compute_saliency_map(
         return _compute_gradcam_map(
             model, x.to(device), class_idx=class_idx, target_layer=target, spatial_layout="hwc"
         )
-    if model_type == "vit":
-        return _compute_vit_token_gradcam_map(model, x.to(device), class_idx=class_idx)
     return None
 
 
@@ -560,11 +494,7 @@ def plot_gradcam_examples(
     *,
     n_examples: int = 8,
 ) -> None:
-    """Save an interpretability overlay panel for all model types.
-
-    Uses Grad-CAM for CNNs (ResNet18, MobileNetV2) and Swin-T,
-    and token Grad-CAM for ViT-B/16.
-    """
+    """Save a Grad-CAM interpretability overlay panel for supported models."""
     try:
         inputs, targets = next(iter(loader))
     except StopIteration:
@@ -580,7 +510,7 @@ def plot_gradcam_examples(
         preds = model(inputs.to(device, non_blocking=True)).argmax(dim=1).cpu().numpy()
 
     rows, cols = 2, int(np.ceil(n_show / 2))
-    method_name = "Token Grad-CAM" if model_type == "vit" else "Grad-CAM"
+    method_name = "Grad-CAM"
     out = Path(cfg.results_dir) / f"gradcam_{run_key}.png"
     out.parent.mkdir(parents=True, exist_ok=True)
     fig, axes = plt.subplots(rows, cols, figsize=(3.2 * cols, 6), dpi=150)
@@ -635,7 +565,7 @@ def _load_weights(model: nn.Module, path: Path, model_type: ModelName) -> None:
 
 
 def load_model_for_inference(
-    model_type: Literal["mobilenet", "resnet18", "vit", "swintiny"], device: torch.device
+    model_type: Literal["mobilenet", "resnet18", "swintiny"], device: torch.device
 ) -> nn.Module:
     """
     Build a model, load the best checkpoint from ``cfg``, and move it to ``device``.

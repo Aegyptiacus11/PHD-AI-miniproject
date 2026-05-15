@@ -39,7 +39,6 @@ os.chdir(REPO_ROOT)
 TRAIN_DIR, TEST_DIR, VAL_DIR = resolve_chest_xray_dirs()
 RUN_RESNET18 = "run_resnet18"
 RUN_MOBILENET = "run_mobilenet"
-RUN_VIT = "run_vit"
 RUN_SWINTINY = "run_swintiny"
 CACHE_TRAIN = "data/cache/chest_xray_train.pt"
 CACHE_VAL = "data/cache/chest_xray_val.pt"
@@ -77,7 +76,7 @@ os.system(
 os.system(
     f'uv run python -m src.train --model resnet18 --run_name "{RUN_RESNET18}" --train_dir "{TRAIN_DIR}" '
     f'--test_dir "{TEST_DIR}"{VAL_ARG}{CACHE_ARGS} '
-    '--mobilenet_lr 1e-4 --resnet_lr 1e-4 --vit_lr 1e-4 --swintiny_lr 1e-4 '
+    '--mobilenet_lr 1e-4 --resnet_lr 1e-4 --swintiny_lr 1e-4 '
     '--num_epochs 20 --batch_size 64 --weight_decay 1e-4 --seed 42 '
     '--freeze_backbone_epochs 5 --devices -1'
 )
@@ -86,25 +85,19 @@ os.system(
 os.system(
     f'uv run python -m src.train --model mobilenet --run_name "{RUN_MOBILENET}" --train_dir "{TRAIN_DIR}" '
     f'--test_dir "{TEST_DIR}"{VAL_ARG}{CACHE_ARGS} '
-    '--mobilenet_lr 1e-4 --resnet_lr 1e-4 --vit_lr 1e-4 --swintiny_lr 1e-4 '
+    '--mobilenet_lr 1e-4 --resnet_lr 1e-4 --swintiny_lr 1e-4 '
     '--num_epochs 20 --batch_size 64 --weight_decay 1e-4 --seed 42 '
     '--freeze_backbone_epochs 5 --devices -1'
 )
 
 # %%
-os.system(
-    f'uv run python -m src.train --model vit --run_name "{RUN_VIT}" --train_dir "{TRAIN_DIR}" '
-    f'--test_dir "{TEST_DIR}"{VAL_ARG}{CACHE_ARGS} '
-    '--mobilenet_lr 1e-4 --resnet_lr 1e-4 --vit_lr 1e-4 --swintiny_lr 1e-4 '
-    '--num_epochs 20 --batch_size 64 --weight_decay 1e-4 --seed 42 '
-    '--freeze_backbone_epochs 5 --devices -1'
-)
+print("This slot is intentionally skipped in the 3-model setup.")
 
 # %%
 os.system(
     f'uv run python -m src.train --model swintiny --run_name "{RUN_SWINTINY}" --train_dir "{TRAIN_DIR}" '
     f'--test_dir "{TEST_DIR}"{VAL_ARG}{CACHE_ARGS} '
-    '--mobilenet_lr 1e-4 --resnet_lr 1e-4 --vit_lr 1e-4 --swintiny_lr 1e-4 '
+    '--mobilenet_lr 1e-4 --resnet_lr 1e-4 --swintiny_lr 1e-4 '
     '--num_epochs 20 --batch_size 64 --weight_decay 1e-4 --seed 42 '
     '--freeze_backbone_epochs 5 --devices -1'
 )
@@ -112,5 +105,5 @@ os.system(
 # %%
 os.system(
     f'uv run python -m src.evaluate --train_dir "{TRAIN_DIR}" --test_dir "{TEST_DIR}" '
-    f'{CACHE_ARGS} --runs "{RUN_RESNET18}" "{RUN_MOBILENET}" "{RUN_VIT}" "{RUN_SWINTINY}"'
+    f'{CACHE_ARGS} --runs "{RUN_RESNET18}" "{RUN_MOBILENET}" "{RUN_SWINTINY}"'
 )

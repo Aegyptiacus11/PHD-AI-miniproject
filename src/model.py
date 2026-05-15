@@ -10,16 +10,14 @@ from torchvision.models import (
     MobileNet_V2_Weights,
     ResNet18_Weights,
     Swin_T_Weights,
-    ViT_B_16_Weights,
     mobilenet_v2,
     resnet18,
     swin_t,
-    vit_b_16,
 )
 
 from src.config import cfg
 
-ModelName = Literal["cnn", "mobilenet", "resnet18", "vit", "swintiny"]
+ModelName = Literal["cnn", "mobilenet", "resnet18", "swintiny"]
 
 
 @runtime_checkable
@@ -115,28 +113,6 @@ class ResNet18Classifier(nn.Module):
         return self.net(x)
 
 
-class ViTB16Classifier(nn.Module):
-    """ViT-B/16 with ImageNet weights and replaced classification head."""
-
-    def __init__(self, num_classes: int = 2, dropout: float = 0.5) -> None:
-        super().__init__()
-        self.net = vit_b_16(weights=ViT_B_16_Weights.IMAGENET1K_V1)
-        in_f = self.net.heads.head.in_features
-        self.net.heads = nn.Sequential(nn.Dropout(dropout), nn.Linear(in_f, num_classes))
-
-    def freeze_backbone(self) -> None:
-        for name, param in self.net.named_parameters():
-            if not name.startswith("heads."):
-                param.requires_grad = False
-
-    def unfreeze_backbone(self) -> None:
-        for param in self.net.parameters():
-            param.requires_grad = True
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.net(x)
-
-
 class SwinTinyClassifier(nn.Module):
     """Swin-T with ImageNet weights and replaced classification head."""
 
@@ -169,7 +145,7 @@ def get_model(
     Instantiate the requested model and move it to ``device``.
 
     Args:
-        model_type: ``cnn``, ``mobilenet``, ``resnet18``, ``vit``, or ``swintiny``.
+        model_type: ``cnn``, ``mobilenet``, ``resnet18``, or ``swintiny``.
         device: Target device for parameters and buffers.
         freeze_backbone: For transfer models, whether to start with the backbone frozen.
             Default ``True`` for transfer models; ignored for ``cnn``.
@@ -185,8 +161,6 @@ def get_model(
         model = MobileNetV2Classifier(num_classes=cfg.num_classes, dropout=cfg.dropout)
     elif model_type == "resnet18":
         model = ResNet18Classifier(num_classes=cfg.num_classes, dropout=cfg.dropout)
-    elif model_type == "vit":
-        model = ViTB16Classifier(num_classes=cfg.num_classes, dropout=cfg.dropout)
     elif model_type == "swintiny":
         model = SwinTinyClassifier(num_classes=cfg.num_classes, dropout=cfg.dropout)
     else:

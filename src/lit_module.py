@@ -22,8 +22,6 @@ def _transfer_lr(model_type: ModelName) -> float:
         return cfg.mobilenet_lr
     if model_type == "resnet18":
         return cfg.resnet_lr
-    if model_type == "vit":
-        return cfg.vit_lr
     if model_type == "swintiny":
         return cfg.swintiny_lr
     return cfg.learning_rate

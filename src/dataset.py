@@ -13,7 +13,7 @@ from torchvision import datasets, transforms
 
 from src.config import cfg
 
-ModelType = Literal["cnn", "mobilenet", "resnet18", "vit", "swintiny"]
+ModelType = Literal["cnn", "mobilenet", "resnet18", "swintiny"]
 
 
 def _transfer_transforms(augment: bool) -> transforms.Compose:
@@ -58,7 +58,7 @@ def get_transforms(model_type: ModelType, augment: bool) -> transforms.Compose:
         ops.extend([transforms.ToTensor(), transforms.Normalize(mean=(0.5,), std=(0.5,))])
         return transforms.Compose(ops)
 
-    if model_type in ("mobilenet", "resnet18", "vit", "swintiny"):
+    if model_type in ("mobilenet", "resnet18", "swintiny"):
         return _transfer_transforms(augment)
 
     raise ValueError(f"Unknown model_type: {model_type}")

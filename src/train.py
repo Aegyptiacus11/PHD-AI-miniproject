@@ -145,8 +145,6 @@ def _apply_cli_overrides(args: argparse.Namespace) -> None:
         cfg.mobilenet_lr = float(args.mobilenet_lr)
     if args.resnet_lr is not None:
         cfg.resnet_lr = float(args.resnet_lr)
-    if args.vit_lr is not None:
-        cfg.vit_lr = float(args.vit_lr)
     if args.swintiny_lr is not None:
         cfg.swintiny_lr = float(args.swintiny_lr)
     if args.num_epochs is not None:
@@ -178,7 +176,6 @@ def run_training(
     lr: float | None = None,
     mobilenet_lr: float | None = None,
     resnet_lr: float | None = None,
-    vit_lr: float | None = None,
     swintiny_lr: float | None = None,
     num_epochs: int | None = None,
     batch_size: int | None = None,
@@ -201,8 +198,6 @@ def run_training(
         cfg.mobilenet_lr = float(mobilenet_lr)
     if resnet_lr is not None:
         cfg.resnet_lr = float(resnet_lr)
-    if vit_lr is not None:
-        cfg.vit_lr = float(vit_lr)
     if swintiny_lr is not None:
         cfg.swintiny_lr = float(swintiny_lr)
     if num_epochs is not None:
@@ -301,14 +296,13 @@ def run_training(
 def main() -> None:
     """Parse CLI arguments and train selected models with Lightning."""
     parser = argparse.ArgumentParser(description="Train chest X-ray pneumonia classifiers (Lightning).")
-    parser.add_argument("--model", choices=["resnet18", "mobilenet", "vit", "swintiny", "all"], default="all")
+    parser.add_argument("--model", choices=["resnet18", "mobilenet", "swintiny", "all"], default="all")
     parser.add_argument("--train_dir", default=cfg.train_dir)
     parser.add_argument("--test_dir", default=cfg.test_dir)
     parser.add_argument("--val_dir", default=cfg.val_dir)
     parser.add_argument("--lr", type=float, default=None, help="CNN Adam LR (default cfg.learning_rate).")
     parser.add_argument("--mobilenet_lr", type=float, default=None)
     parser.add_argument("--resnet_lr", type=float, default=None)
-    parser.add_argument("--vit_lr", type=float, default=None)
     parser.add_argument("--swintiny_lr", type=float, default=None)
     parser.add_argument("--num_epochs", type=int, default=None)
     parser.add_argument("--batch_size", type=int, default=None)
